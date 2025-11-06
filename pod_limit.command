@@ -22,3 +22,37 @@ kubectl get pods -A -o json | jq -r '
   ] | map(sub("Mi$";"") | sub("Gi$";"000") | tonumber) | add) as $lim_mem_mi |
   [$ns, $pod, "\($req_cpu_m)m", "\($lim_cpu_m)m", "\($req_mem_mi)Mi", "\($lim_mem_mi)Mi"]
 | @tsv' | column -t
+
+
+#!/usr/bin/env bash
+
+echo -e "NAMESPACE\tPOD\tCPU(used/limit)\tMEM(used/limit)"
+
+kubectl get pods -A -o json | jq -r '
+  .items[] |
+  .metadata.namespace as $ns |
+  .metadata.name as $pod |
+  (
+    [ .spec.containers[]?.resources.limits.cpu // "0" ]
+    | map(if test("m$") then sub("m$";"")|tonumber else (.|tonumber*1000) end)
+    | add
+  ) as $cpu_limit_m |
+  (
+    [ .spec.containers[]?.resources.limits.memory // "0" ]
+    | map(
+        if test("Gi$") then sub("Gi$";"")|tonumber*1024
+        elif test("Mi$") then sub("Mi$";"")|tonumber
+        else 0 end
+      )
+    | add
+  ) as $mem_limit_mi |
+  [$ns, $pod, $cpu_limit_m, $mem_limit_mi]
+| @tsv' | while IFS=$'\t' read -r ns pod cpu_limit mem_limit; do
+  usage=$(kubectl top pod -n "$ns" "$pod" --no-headers 2>/dev/null)
+  cpu_used=$(awk '{print $2}' <<<"$usage" | sed 's/m//')
+  mem_used=$(awk '{print $3}' <<<"$usage" | sed 's/Mi//')
+  if [[ -z "$cpu_used" || -z "$mem_used" ]]; then continue; fi
+  cpu_pct=$(awk "BEGIN {if ($cpu_limit>0) printf \"%.0f%%\", $cpu_used/$cpu_limit*100; else print \"-\"}")
+  mem_pct=$(awk "BEGIN {if ($mem_limit>0) printf \"%.0f%%\", $mem_used/$mem_limit*100; else print \"-\"}")
+  echo -e "$ns\t$pod\t${cpu_used}m/${cpu_limit}m ($cpu_pct)\t${mem_used}Mi/${mem_limit}Mi ($mem_pct)"
+done | column -t
